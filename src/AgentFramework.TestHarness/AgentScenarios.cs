@@ -7,12 +7,16 @@ using System.Threading.Tasks;
 using AgentFramework.Core.Contracts;
 using AgentFramework.Core.Extensions;
 using AgentFramework.Core.Messages;
+using AgentFramework.Core.Messages.Credentials;
 using AgentFramework.Core.Models.Connections;
 using AgentFramework.Core.Models.Credentials;
 using AgentFramework.Core.Models.Events;
+using AgentFramework.Core.Models.Proofs;
 using AgentFramework.Core.Models.Records;
 using AgentFramework.Core.Utils;
 using AgentFramework.TestHarness.Mock;
+using AgentFramework.TestHarness.Utils;
+using Newtonsoft.Json;
 using Xunit;
 
 namespace AgentFramework.TestHarness
@@ -57,7 +61,47 @@ namespace AgentFramework.TestHarness
             return (connectionRecord1, connectionRecord2);
         }
 
-        public static async Task IssueCredential(MockAgent issuer, MockAgent holder, ConnectionRecord issuerConnection, ConnectionRecord holderConnection)
+        public static async Task<(ConnectionRecord inviteeConnection, ConnectionRecord inviterConnection)> EstablishConnectionWithReturnRoutingAsync(MockAgent invitee, MockAgent inviter)
+        {
+            var slim = new SemaphoreSlim(0, 1);
+
+            var connectionService = invitee.GetService<IConnectionService>();
+            var messsageService = invitee.GetService<IMessageService>();
+
+            // Hook into response message event of second runtime to release semaphore
+            inviter.GetService<IEventAggregator>().GetEventByType<ServiceMessageProcessingEvent>()
+                .Where(x => x.MessageType == MessageTypes.ConnectionResponse)
+                .Subscribe(x => slim.Release());
+
+            (var invitation, var inviterConnection) = await connectionService.CreateInvitationAsync(invitee.Context,
+                new InviteConfiguration { AutoAcceptConnection = true });
+
+            (var request, var inviteeConnection) =
+                await connectionService.CreateRequestAsync(inviter.Context, invitation);
+            var response = await messsageService.SendToConnectionAsync(inviter.Context.Wallet, request,
+                inviteeConnection, invitation.RecipientKeys.First(), true);
+
+            Assert.NotNull(response);
+            await inviter.HandleInboundAsync(response);
+
+            await slim.WaitAsync(TimeSpan.FromSeconds(30));
+
+            var connectionRecord1 = await connectionService.GetAsync(invitee.Context, inviterConnection.Id);
+            var connectionRecord2 = await connectionService.GetAsync(inviter.Context, inviteeConnection.Id);
+
+            Assert.Equal(ConnectionState.Connected, connectionRecord1.State);
+            Assert.Equal(ConnectionState.Connected, connectionRecord2.State);
+            Assert.Equal(connectionRecord1.MyDid, connectionRecord2.TheirDid);
+            Assert.Equal(connectionRecord1.TheirDid, connectionRecord2.MyDid);
+
+            Assert.Equal(
+                connectionRecord1.GetTag(TagConstants.LastThreadId),
+                connectionRecord2.GetTag(TagConstants.LastThreadId));
+
+            return (connectionRecord1, connectionRecord2);
+        }
+
+        public static async Task IssueCredential(MockAgent issuer, MockAgent holder, ConnectionRecord issuerConnection, ConnectionRecord holderConnection, List<CredentialPreviewAttribute> credentialAttributes)
         {
             var credentialService = issuer.GetService<ICredentialService>();
             var messsageService = issuer.GetService<IMessageService>();
@@ -73,17 +117,13 @@ namespace AgentFramework.TestHarness
             var issuerProv = await provisionService.GetProvisioningAsync(issuer.Context.Wallet);
 
             var (definitionId, _) = await Scenarios.CreateDummySchemaAndNonRevokableCredDef(issuer.Context, schemaService,
-                issuerProv.IssuerDid, new[] { "first_name", "last_name" });
+                issuerProv.IssuerDid, credentialAttributes.Select(_ => _.Name).ToArray());
 
             (var offer, var issuerCredentialRecord) = await credentialService.CreateOfferAsync(issuer.Context, new OfferConfiguration
             {
                 IssuerDid = issuerProv.IssuerDid,
                 CredentialDefinitionId = definitionId,
-                CredentialAttributeValues = new Dictionary<string, string>()
-                {
-                    { "first_name", "Test" },
-                    { "last_name", "Holder" }
-                }
+                CredentialAttributeValues = credentialAttributes,
             }, issuerConnection.Id);
             await messsageService.SendToConnectionAsync(issuer.Context.Wallet, offer, issuerConnection);
 
@@ -101,6 +141,11 @@ namespace AgentFramework.TestHarness
                 .Subscribe(x => requestSlim.Release());
 
             (var request, var holderCredentialRecord) = await credentialService.CreateCredentialRequestAsync(holder.Context, offers[0].Id);
+
+            Assert.NotNull(holderCredentialRecord.CredentialAttributesValues);
+            
+            Assert.True(holderCredentialRecord.CredentialAttributesValues.Count() == 2);
+
             await messsageService.SendToConnectionAsync(holder.Context.Wallet, request, holderConnection);
 
             await requestSlim.WaitAsync(TimeSpan.FromSeconds(30));
@@ -126,6 +171,57 @@ namespace AgentFramework.TestHarness
             Assert.Equal(
                 issuerCredRecord.GetTag(TagConstants.LastThreadId),
                 holderCredRecord.GetTag(TagConstants.LastThreadId));
+        }
+
+        public static async Task ProofProtocol(MockAgent requestor, MockAgent holder,
+            ConnectionRecord requestorConnection, ConnectionRecord holderConnection, ProofRequest proofRequest)
+        {
+            var proofService = requestor.GetService<IProofService>();
+            var messageService = requestor.GetService<IMessageService>();
+
+            // Hook into message event
+            var requestSlim = new SemaphoreSlim(0, 1);
+            holder.GetService<IEventAggregator>().GetEventByType<ServiceMessageProcessingEvent>()
+                .Where(x => x.MessageType == MessageTypes.ProofRequest)
+                .Subscribe(x => requestSlim.Release());
+
+            var (requestMsg, requestorRecord) = await proofService.CreateProofRequestAsync(requestor.Context, proofRequest, requestorConnection.Id);
+            await messageService.SendToConnectionAsync(requestor.Context.Wallet, requestMsg, requestorConnection);
+
+            await requestSlim.WaitAsync(TimeSpan.FromSeconds(30));
+
+            var holderRequests = await proofService.ListRequestedAsync(holder.Context);
+
+            Assert.NotNull(holderRequests);
+            Assert.True(holderRequests.Count > 0);
+
+            // Hook into message event
+            var proofSlim = new SemaphoreSlim(0, 1);
+            requestor.GetService<IEventAggregator>().GetEventByType<ServiceMessageProcessingEvent>()
+                .Where(x => x.MessageType == MessageTypes.DisclosedProof)
+                .Subscribe(x => requestSlim.Release());
+
+            var record = holderRequests.FirstOrDefault();
+            var request = JsonConvert.DeserializeObject<ProofRequest>(record.RequestJson);
+
+            var requestedCredentials =
+                await ProofServiceUtils.GetAutoRequestedCredentialsForProofCredentials(holder.Context, proofService,
+                    request);
+
+            var (proofMsg, holderRecord) = await proofService.CreateProofAsync(holder.Context, record.Id, requestedCredentials);
+            await messageService.SendToConnectionAsync(holder.Context.Wallet, proofMsg, holderConnection);
+
+            await proofSlim.WaitAsync(TimeSpan.FromSeconds(30));
+
+            var requestorProofRecord = await proofService.GetAsync(requestor.Context, requestorRecord.Id);
+            var holderProofRecord = await proofService.GetAsync(holder.Context, holderRecord.Id);
+
+            Assert.True(requestorProofRecord.State == ProofState.Accepted);
+            Assert.True(holderProofRecord.State == ProofState.Accepted);
+
+            var isProofValid = await proofService.VerifyProofAsync(requestor.Context, requestorProofRecord.Id);
+
+            Assert.True(isProofValid);
         }
     }
 }

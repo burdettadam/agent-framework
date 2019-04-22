@@ -1,5 +1,7 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.Threading.Tasks;
+using AgentFramework.Core.Models.Credentials;
 using AgentFramework.Core.Models.Wallets;
 using AgentFramework.TestHarness;
 using AgentFramework.TestHarness.Mock;
@@ -19,9 +21,9 @@ namespace AgentFramework.Core.Tests.Integration
 
         public async Task InitializeAsync()
         {
-            _issuerAgent = await MockUtils.CreateAsync("issuer", config1, cred, new MockAgentHttpHandler((name, data) => _router.RouteMessage(name, data)), "000000000000000000000000Steward1");
+            _issuerAgent = await MockUtils.CreateAsync("issuer", config1, cred, new MockAgentHttpHandler((cb) => _router.RouteMessage(cb.name, cb.data)), TestConstants.StewartDid);
             _router.RegisterAgent(_issuerAgent);
-            _holderAgent = await MockUtils.CreateAsync("holder", config2, cred, new MockAgentHttpHandler((name, data) => _router.RouteMessage(name, data)));
+            _holderAgent = await MockUtils.CreateAsync("holder", config2, cred, new MockAgentHttpHandler((cb) => _router.RouteMessage((cb).name, cb.data)));
             _router.RegisterAgent(_holderAgent);
         }
 
@@ -29,7 +31,11 @@ namespace AgentFramework.Core.Tests.Integration
         public async Task CanIssueCredential()
         {
             (var issuerConnection, var holderConnection)  = await AgentScenarios.EstablishConnectionAsync(_issuerAgent, _holderAgent);
-            await AgentScenarios.IssueCredential(_issuerAgent, _holderAgent, issuerConnection, holderConnection);
+            await AgentScenarios.IssueCredential(_issuerAgent, _holderAgent, issuerConnection, holderConnection, new List<CredentialPreviewAttribute>
+            {
+                new CredentialPreviewAttribute("first_name", "Test"),
+                new CredentialPreviewAttribute("last_name", "Holder")
+            });
         }
 
         public async Task DisposeAsync()

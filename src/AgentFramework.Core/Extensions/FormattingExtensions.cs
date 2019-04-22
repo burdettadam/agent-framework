@@ -1,8 +1,9 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Text;
 using AgentFramework.Core.Messages;
-using Multiformats.Base;
+using AgentFramework.Core.Utils;
 using Newtonsoft.Json;
 
 namespace AgentFramework.Core.Extensions
@@ -49,17 +50,19 @@ namespace AgentFramework.Core.Extensions
                 ? throw new Exception("Use GetUTF8Bytes() extension for string types")
                 : GetUTF8Bytes(ToJson(value));
 
-        /// <summary>Converts the specified string, which encodes binary data as base-64 digits,
+        /// <summary>
+        /// Converts the specified string, which encodes binary data as base-64 digits,
         /// to an equivalent 8-bit unsigned integer array.</summary>
         /// <param name="value">The value.</param>
         /// <returns></returns>
-        public static byte[] GetBytesFromBase64(this string value) => Convert.FromBase64String(value);
+        public static byte[] GetBytesFromBase64(this string value) => Base64UrlEncoder.DecodeBytes(value);
 
-        /// <summary>Converts an array of 8-bit unsigned integers to its equivalent string
+        /// <summary>
+        /// Converts an array of 8-bit unsigned integers to its equivalent string
         /// representation that is encoded with base-64 digits.</summary>
         /// <param name="value">The value.</param>
         /// <returns></returns>
-        public static string ToBase64String(this byte[] value) => Convert.ToBase64String(value);
+        public static string ToBase64String(this byte[] value) => Base64UrlEncoder.Encode(value);
 
         private static readonly JsonSerializerSettings SerializerSettings = new JsonSerializerSettings
         {
@@ -85,11 +88,39 @@ namespace AgentFramework.Core.Extensions
             JsonConvert.SerializeObject(obj, settings);
 
         /// <summary>
-        /// Converts a string to base58 representation.
+        /// Converts a string to base64 representation.
         /// </summary>
         /// <param name="value">The value.</param>
-        /// <returns></returns>
-        public static string ToBase58(this string value) =>
-            Multibase.Base58.Encode(Encoding.UTF8.GetBytes(value));
+        /// <returns>The value base64 encoded.</returns>
+        public static string ToBase64(this string value) => Base64UrlEncoder.Encode(value);
+
+        /// <summary>
+        /// Converts a string from base64 representation.
+        /// </summary>
+        /// <param name="value">The base64 value.</param>
+        /// <returns>The value decoded.</returns>
+        public static string FromBase64(this string value) => Base64UrlEncoder.Decode(value);
+
+        /// <summary>
+        /// Decodes a set of query parameters from a uri.
+        /// </summary>
+        /// <param name="uri">The uri featuring query parameters.</param>
+        /// <returns>A dictionary of query parameters.</returns>
+        public static Dictionary<string, string> DecodeQueryParameters(this Uri uri)
+        {
+            if (uri == null)
+                throw new ArgumentNullException(nameof(uri));
+
+            if (uri.Query.Length == 0)
+                return new Dictionary<string, string>();
+
+            return uri.Query.TrimStart('?')
+                .Split(new[] { '&', ';' }, StringSplitOptions.RemoveEmptyEntries)
+                .Select(parameter => parameter.Split(new[] { '=' }, StringSplitOptions.RemoveEmptyEntries))
+                .GroupBy(parts => parts[0],
+                    parts => parts.Length > 2 ? string.Join("=", parts, 1, parts.Length - 1) : (parts.Length > 1 ? parts[1] : ""))
+                .ToDictionary(grouping => grouping.Key,
+                    grouping => string.Join(",", grouping));
+        }
     }
 }

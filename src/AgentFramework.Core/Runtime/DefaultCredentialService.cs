@@ -117,6 +117,7 @@ namespace AgentFramework.Core.Runtime
                 OfferJson = offerJson,
                 ConnectionId = connection.Id,
                 CredentialDefinitionId = definitionId,
+                CredentialAttributesValues = credentialOffer.Preview?.Attributes,
                 SchemaId = schemaId,
                 State = CredentialState.Offered
             };
@@ -136,8 +137,8 @@ namespace AgentFramework.Core.Runtime
         }
 
         /// <inheritdoc />
-        public virtual async Task<(CredentialRequestMessage, CredentialRecord)> CreateCredentialRequestAsync(IAgentContext agentContext, string offerId,
-            Dictionary<string, string> attributeValues = null)
+        public virtual async Task<(CredentialRequestMessage, CredentialRecord)> CreateCredentialRequestAsync(
+            IAgentContext agentContext, string offerId)
         {
             var credential = await GetAsync(agentContext, offerId);
 
@@ -147,23 +148,24 @@ namespace AgentFramework.Core.Runtime
 
             var connection = await ConnectionService.GetAsync(agentContext, credential.ConnectionId);
 
-            var definition = await LedgerService.LookupDefinitionAsync(await agentContext.Pool, credential.CredentialDefinitionId);
+            var definition =
+                await LedgerService.LookupDefinitionAsync(await agentContext.Pool, credential.CredentialDefinitionId);
             var provisioning = await ProvisioningService.GetProvisioningAsync(agentContext.Wallet);
-            
-            var request = await AnonCreds.ProverCreateCredentialReqAsync(agentContext.Wallet, connection.MyDid, credential.OfferJson,
+
+            var request = await AnonCreds.ProverCreateCredentialReqAsync(agentContext.Wallet, connection.MyDid,
+                credential.OfferJson,
                 definition.ObjectJson, provisioning.MasterSecretId);
 
             // Update local credential record with new info
             credential.CredentialRequestMetadataJson = request.CredentialRequestMetadataJson;
-            
+
             await credential.TriggerAsync(CredentialTrigger.Request);
             await RecordService.UpdateAsync(agentContext.Wallet, credential);
 
             var threadId = credential.GetTag(TagConstants.LastThreadId);
             var response = new CredentialRequestMessage
             {
-                CredentialRequestJson = request.CredentialRequestJson,
-                CredentialValuesJson = CredentialUtils.FormatCredentialValues(attributeValues)
+                CredentialRequestJson = request.CredentialRequestJson
             };
 
             response.ThreadFrom(threadId);
@@ -213,6 +215,8 @@ namespace AgentFramework.Core.Runtime
                 credential.CredentialJson, credentialDefinition.ObjectJson, revocationRegistryDefinitionJson);
 
             credentialRecord.CredentialId = credentialId;
+            credentialRecord.CredentialAttributesValues = null;
+
             await credentialRecord.TriggerAsync(CredentialTrigger.Issue);
             await RecordService.UpdateAsync(agentContext.Wallet, credentialRecord);
 
@@ -240,8 +244,15 @@ namespace AgentFramework.Core.Runtime
                 var connection = await ConnectionService.GetAsync(agentContext, connectionId);
 
                 if (connection.State != ConnectionState.Connected)
+                {
                     throw new AgentFrameworkException(ErrorCode.RecordInInvalidState,
                         $"Connection state was invalid. Expected '{ConnectionState.Connected}', found '{connection.State}'");
+                }
+            }
+
+            if (config.CredentialAttributeValues != null && config.CredentialAttributeValues.Any())
+            {
+                CredentialUtils.ValidateCredentialPreviewAttributes(config.CredentialAttributeValues);
             }
 
             var offerJson = await AnonCreds.IssuerCreateCredentialOfferAsync(
@@ -257,7 +268,7 @@ namespace AgentFramework.Core.Runtime
                 OfferJson = offerJson,
                 ConnectionId = connectionId,
                 SchemaId = schemaId,
-                ValuesJson = CredentialUtils.FormatCredentialValues(config.CredentialAttributeValues),
+                CredentialAttributesValues = config.CredentialAttributeValues,
                 State = CredentialState.Offered,
             };
             
@@ -276,7 +287,15 @@ namespace AgentFramework.Core.Runtime
 
             await RecordService.AddAsync(agentContext.Wallet, credentialRecord);
 
-            return (new CredentialOfferMessage {Id = threadId, OfferJson = offerJson}, credentialRecord);
+            return (new CredentialOfferMessage
+            {
+                Id = threadId,
+                OfferJson = offerJson,
+                Preview = credentialRecord.CredentialAttributesValues != null ? new CredentialPreviewMessage
+                {
+                    Attributes = credentialRecord.CredentialAttributesValues
+                } : null
+            }, credentialRecord);
         }
 
         /// <inheritdoc />
@@ -301,9 +320,6 @@ namespace AgentFramework.Core.Runtime
             if (credential.State != CredentialState.Offered)
                 throw new AgentFrameworkException(ErrorCode.RecordInInvalidState,
                     $"Credential state was invalid. Expected '{CredentialState.Offered}', found '{credential.State}'");
-
-            if (!string.IsNullOrEmpty(credentialRequest.CredentialValuesJson) && JObject.Parse(credentialRequest.CredentialValuesJson).Count != 0)
-                    credential.ValuesJson = credentialRequest.CredentialValuesJson;
 
             credential.RequestJson = credentialRequest.CredentialRequestJson;
             credential.ConnectionId = connection.Id;
@@ -342,7 +358,7 @@ namespace AgentFramework.Core.Runtime
 
         /// <inheritdoc />
         public virtual async Task<(CredentialMessage, CredentialRecord)> CreateCredentialAsync(IAgentContext agentContext, string issuerDid, string credentialId,
-           Dictionary<string, string> values)
+           IEnumerable<CredentialPreviewAttribute> values)
         {
             var credential = await GetAsync(agentContext, credentialId);
 
@@ -350,8 +366,8 @@ namespace AgentFramework.Core.Runtime
                 throw new AgentFrameworkException(ErrorCode.RecordInInvalidState,
                     $"Credential state was invalid. Expected '{CredentialState.Requested}', found '{credential.State}'");
 
-            if (values != null && values.Count > 0)
-                credential.ValuesJson = CredentialUtils.FormatCredentialValues(values);
+            if (values != null && values.Any())
+                credential.CredentialAttributesValues = values;
 
             var definitionRecord =
                 await SchemaService.GetCredentialDefinitionAsync(agentContext.Wallet, credential.CredentialDefinitionId);
@@ -376,7 +392,7 @@ namespace AgentFramework.Core.Runtime
             }
 
             var issuedCredential = await AnonCreds.IssuerCreateCredentialAsync(agentContext.Wallet, credential.OfferJson,
-                credential.RequestJson, credential.ValuesJson, revocationRegistryId, tailsReader);
+                credential.RequestJson, CredentialUtils.FormatCredentialValues(credential.CredentialAttributesValues), revocationRegistryId, tailsReader);
 
             if (definitionRecord.SupportsRevocation)
             {

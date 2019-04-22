@@ -100,7 +100,11 @@ namespace AgentFramework.Core.Tests.Protocols
 
             var (issuerCredential, holderCredential) = await Scenarios.IssueCredentialAsync(
                 _schemaService, _credentialService, _messages, issuerConnection,
-                holderConnection, _issuerWallet, _holderWallet, await _holderWallet.Pool, TestConstants.DefaultMasterSecret, false);
+                holderConnection, _issuerWallet, _holderWallet, await _holderWallet.Pool, TestConstants.DefaultMasterSecret, false, new List<CredentialPreviewAttribute>
+                {
+                    new CredentialPreviewAttribute("first_name", "Test"),
+                    new CredentialPreviewAttribute("last_name", "Holder")
+                });
 
             Assert.True(events == 3);
 
@@ -112,16 +116,91 @@ namespace AgentFramework.Core.Tests.Protocols
         public async Task CanCreateCredentialOffer()
         {
             var issuer = await Did.CreateAndStoreMyDidAsync(_issuerWallet.Wallet,
-                new { seed = "000000000000000000000000Steward1" }.ToJson());
+                new { seed = TestConstants.StewartDid }.ToJson());
 
             var result = await Scenarios.CreateDummySchemaAndNonRevokableCredDef(_issuerWallet, _schemaService, issuer.Did,
                 new[] {"test-attr"});
 
-            var (_, credentialRecord) = await _credentialService.CreateOfferAsync(_issuerWallet,
+            var (msg, credentialRecord) = await _credentialService.CreateOfferAsync(_issuerWallet,
                 new OfferConfiguration { CredentialDefinitionId = result.Item1 });
 
             Assert.Equal(CredentialState.Offered, credentialRecord.State);
+            Assert.NotNull(msg);
+            Assert.Null(msg.Preview);
         }
+
+        [Fact]
+        public async Task CanCreateCredentialOfferWithPreview()
+        {
+            var issuer = await Did.CreateAndStoreMyDidAsync(_issuerWallet.Wallet,
+                new { seed = TestConstants.StewartDid }.ToJson());
+
+            var result = await Scenarios.CreateDummySchemaAndNonRevokableCredDef(_issuerWallet, _schemaService, issuer.Did,
+                new[] { "test-attr" });
+
+            var (msg, credentialRecord) = await _credentialService.CreateOfferAsync(_issuerWallet,
+                new OfferConfiguration
+                {
+                    CredentialDefinitionId = result.Item1,
+                    CredentialAttributeValues = new List<CredentialPreviewAttribute>
+                    {
+                        new CredentialPreviewAttribute("test-attr","test-attr-value")
+                    }
+                });
+
+            Assert.Equal(CredentialState.Offered, credentialRecord.State);
+            Assert.NotNull(msg);
+            Assert.NotNull(msg.Preview);
+            Assert.True(msg.Preview.Attributes.Count() == 1);
+
+            var previewAttr = msg.Preview.Attributes.ToArray()[0];
+
+            Assert.True(previewAttr.Name == "test-attr");
+            Assert.True(previewAttr.MimeType == CredentialMimeTypes.TextMimeType);
+            Assert.True(previewAttr.Value == "test-attr-value");
+        }
+
+        [Fact]
+        public async Task CreateCredentialOfferWithBadAttributeValuesThrowsException()
+        {
+            var ex = await Assert.ThrowsAsync<AgentFrameworkException>(async () => await _credentialService.CreateOfferAsync(_issuerWallet,
+                new OfferConfiguration
+                {
+                    CredentialAttributeValues = new List<CredentialPreviewAttribute>
+                    {
+                        new CredentialPreviewAttribute("test-attr","test-attr-value")
+                        {
+                            MimeType = "bad-mime-type"
+                        }
+                    }
+                }));
+
+            Assert.True(ex.ErrorCode == ErrorCode.InvalidParameterFormat);
+        }
+
+        [Fact]
+        public async Task CreateCredentialOfferWithMultipleBadAttributeValuesThrowsException()
+        {
+            var ex = await Assert.ThrowsAsync<AgentFrameworkException>(async () => await _credentialService.CreateOfferAsync(_issuerWallet,
+                new OfferConfiguration
+                {
+                    CredentialAttributeValues = new List<CredentialPreviewAttribute>
+                    {
+                        new CredentialPreviewAttribute("test-attr","test-attr-value")
+                        {
+                            MimeType = "bad-mime-type"
+                        },
+                        new CredentialPreviewAttribute("test-attr1","test-attr-value1")
+                        {
+                            MimeType = "bad-mime-type"
+                        }
+                    }
+                }));
+
+            Assert.True(ex.ErrorCode == ErrorCode.InvalidParameterFormat);
+            Assert.True(ex.Message.Split('\n').Count() == 2);
+        }
+
 
         [Fact]
         public async Task RevokeCredentialOfferThrowsCredentialNotFound()
@@ -139,7 +218,7 @@ namespace AgentFramework.Core.Tests.Protocols
 
             // Create an issuer DID/VK. Can also be created during provisioning
             var issuer = await Did.CreateAndStoreMyDidAsync(_issuerWallet.Wallet,
-                new { seed = "000000000000000000000000Steward1" }.ToJson());
+                new { seed = TestConstants.StewartDid }.ToJson());
 
             // Create a schema and credential definition for this issuer
             var (definitionId, _) = await Scenarios.CreateDummySchemaAndNonRevokableCredDef(_issuerWallet, _schemaService, issuer.Did,
@@ -166,11 +245,7 @@ namespace AgentFramework.Core.Tests.Protocols
             await AnonCreds.ProverCreateMasterSecretAsync(_holderWallet.Wallet, TestConstants.DefaultMasterSecret);
 
             // Holder accepts the credential offer and sends a credential request
-            (var request, _) = await _credentialService.CreateCredentialRequestAsync(_holderWallet, holderCredentialId,
-                new Dictionary<string, string>
-                {
-                    {"dummy_attr", "dummyVal"}
-                });
+            var (request, _) = await _credentialService.CreateCredentialRequestAsync(_holderWallet, holderCredentialId);
             _messages.Add(request);
 
             // Issuer retrieves credential request from cloud agent
@@ -252,7 +327,7 @@ namespace AgentFramework.Core.Tests.Protocols
 
             // Create an issuer DID/VK. Can also be created during provisioning
             var issuer = await Did.CreateAndStoreMyDidAsync(_issuerWallet.Wallet,
-                new { seed = "000000000000000000000000Steward1" }.ToJson());
+                new { seed = TestConstants.StewartDid }.ToJson());
 
             // Create a schema and credential definition for this issuer
             var (definitionId, _) = await Scenarios.CreateDummySchemaAndNonRevokableCredDef(_issuerWallet, _schemaService, issuer.Did,
@@ -279,11 +354,7 @@ namespace AgentFramework.Core.Tests.Protocols
             await AnonCreds.ProverCreateMasterSecretAsync(_holderWallet.Wallet, TestConstants.DefaultMasterSecret);
 
             // Holder accepts the credential offer and sends a credential request
-            (var request, var _) = await _credentialService.CreateCredentialRequestAsync(_holderWallet, holderCredentialId,
-                new Dictionary<string, string>
-                {
-                    {"dummy_attr", "dummyVal"}
-                });
+            (var request, var _) = await _credentialService.CreateCredentialRequestAsync(_holderWallet, holderCredentialId);
             _messages.Add(request);
 
             // Issuer retrieves credential request from cloud agent
@@ -306,7 +377,7 @@ namespace AgentFramework.Core.Tests.Protocols
         {
             // Create an issuer DID/VK. Can also be created during provisioning
             var issuer = await Did.CreateAndStoreMyDidAsync(_issuerWallet.Wallet,
-                new { seed = "000000000000000000000000Steward1" }.ToJson());
+                new { seed = TestConstants.StewartDid }.ToJson());
             
             var ex = await Assert.ThrowsAsync<AgentFrameworkException>(async () => await _credentialService.CreateCredentialAsync(_issuerWallet, issuer.Did, "bad-credential-id"));
             Assert.True(ex.ErrorCode == ErrorCode.RecordNotFound);
@@ -321,7 +392,7 @@ namespace AgentFramework.Core.Tests.Protocols
 
             // Create an issuer DID/VK. Can also be created during provisioning
             var issuer = await Did.CreateAndStoreMyDidAsync(_issuerWallet.Wallet,
-                new { seed = "000000000000000000000000Steward1" }.ToJson());
+                new { seed = TestConstants.StewartDid }.ToJson());
 
             // Create a schema and credential definition for this issuer
             var (definitionId, _) = await Scenarios.CreateDummySchemaAndNonRevokableCredDef(_issuerWallet, _schemaService, issuer.Did,
@@ -348,11 +419,7 @@ namespace AgentFramework.Core.Tests.Protocols
             await AnonCreds.ProverCreateMasterSecretAsync(_holderWallet.Wallet, TestConstants.DefaultMasterSecret);
 
             // Holder accepts the credential offer and sends a credential request
-            (var request, var _) = await _credentialService.CreateCredentialRequestAsync(_holderWallet, holderCredentialId,
-                new Dictionary<string, string>
-                {
-                    {"dummy_attr", "dummyVal"}
-                });
+            var (request, _) = await _credentialService.CreateCredentialRequestAsync(_holderWallet, holderCredentialId);
             _messages.Add(request);
 
             // Issuer retrieves credential request from cloud agent
@@ -364,7 +431,8 @@ namespace AgentFramework.Core.Tests.Protocols
                 await _credentialService.ProcessCredentialRequestAsync(_issuerWallet, credentialRequest, issuerConnection);
 
             // Issuer accepts the credential requests and issues a credential
-            (var credential, var _) = await _credentialService.CreateCredentialAsync(_issuerWallet, issuer.Did, issuerCredentialId);
+            var (credential, _) = await _credentialService.CreateCredentialAsync(_issuerWallet, issuer.Did, issuerCredentialId,
+                new List<CredentialPreviewAttribute> { new CredentialPreviewAttribute("dummy_attr","dummyVal")});
             _messages.Add(credential);
 
             //Try issue the credential again
@@ -388,7 +456,7 @@ namespace AgentFramework.Core.Tests.Protocols
 
             // Create an issuer DID/VK. Can also be created during provisioning
             var issuer = await Did.CreateAndStoreMyDidAsync(_issuerWallet.Wallet,
-                new { seed = "000000000000000000000000Steward1" }.ToJson());
+                new { seed = TestConstants.StewartDid }.ToJson());
 
             // Create a schema and credential definition for this issuer
             var (definitionId, _) = await Scenarios.CreateDummySchemaAndNonRevokableCredDef(_issuerWallet, _schemaService, issuer.Did,

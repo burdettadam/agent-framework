@@ -9,6 +9,7 @@ using AgentFramework.Core.Exceptions;
 using AgentFramework.Core.Messages;
 using AgentFramework.Core.Messages.EphemeralChallenge;
 using AgentFramework.Core.Models;
+using AgentFramework.Core.Models.Credentials;
 using AgentFramework.Core.Models.EphemeralChallenge;
 using AgentFramework.Core.Models.Proofs;
 using AgentFramework.Core.Models.Records;
@@ -52,15 +53,15 @@ namespace AgentFramework.Core.Tests.Protocols
 
             var routingMock = new Mock<IMessageService>();
             routingMock.Setup(x =>
-                    x.SendToConnectionAsync(It.IsAny<Wallet>(), It.IsAny<AgentMessage>(), It.IsAny<ConnectionRecord>(), It.IsAny<string>()))
-                .Callback((Wallet _, AgentMessage content, ConnectionRecord __, string ___) =>
+                    x.SendToConnectionAsync(It.IsAny<Wallet>(), It.IsAny<AgentMessage>(), It.IsAny<ConnectionRecord>(), It.IsAny<string>(), It.IsAny<bool>()))
+                .Callback((Wallet _, AgentMessage content, ConnectionRecord __, string ___, bool ____) =>
                 {
                     if (_routeMessage)
                         _messages.Add(content);
                     else
                         throw new AgentFrameworkException(ErrorCode.LedgerOperationRejected, "");
                 })
-                .Returns(Task.FromResult(false));
+                .Returns(Task.FromResult<byte[]>(null));
 
             var provisioningMock = ServiceUtils.GetDefaultMockProvisioningService();
 
@@ -181,7 +182,11 @@ namespace AgentFramework.Core.Tests.Protocols
 
             await Scenarios.IssueCredentialAsync(
                 _schemaService, _credentialService, _messages, issuerConnection,
-                holderConnection, _issuerWallet, _holderWallet, await _holderWallet.Pool, TestConstants.DefaultMasterSecret, true);
+                holderConnection, _issuerWallet, _holderWallet, await _holderWallet.Pool, TestConstants.DefaultMasterSecret, true, new List<CredentialPreviewAttribute>
+                {
+                    new CredentialPreviewAttribute("first_name", "Test"),
+                    new CredentialPreviewAttribute("last_name", "Holder")
+                });
 
             _messages.Clear();
 
@@ -203,6 +208,12 @@ namespace AgentFramework.Core.Tests.Protocols
                 var challengeConfigId = await _ephemeralChallengeService.CreateChallengeConfigAsync(_requestorWallet, challengeConfig);
 
                 (var challenge, var record) = await _ephemeralChallengeService.CreateChallengeAsync(_requestorWallet, challengeConfigId);
+
+                Assert.True(!string.IsNullOrEmpty(challenge.ChallengerName));
+                Assert.True(challenge.RecipientKeys.Count() == 1);
+                Assert.True(challenge.RecipientKeys.First() ==  TestConstants.DefaultVerkey);
+                Assert.True(challenge.ServiceEndpoint == TestConstants.DefaultMockUri);
+
                 _messages.Add(challenge);
 
                 var result = await _ephemeralChallengeService.GetChallengeStateAsync(_requestorWallet, record.Id);

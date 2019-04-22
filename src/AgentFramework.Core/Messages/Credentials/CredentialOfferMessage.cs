@@ -14,6 +14,15 @@ namespace AgentFramework.Core.Messages.Credentials
             Id = Guid.NewGuid().ToString();
             Type = MessageTypes.CredentialOffer;
         }
+
+        /// <summary>
+        /// Gets or sets the comment.
+        /// </summary>
+        /// <value>
+        /// The comment.
+        /// </value>
+        [JsonProperty("comment", NullValueHandling = NullValueHandling.Ignore)]
+        public string Comment { get; set; }
         
         /// <summary>
         /// Gets or sets the offer json.
@@ -21,7 +30,17 @@ namespace AgentFramework.Core.Messages.Credentials
         /// <value>
         /// The offer json.
         /// </value>
+        [JsonProperty("offer_json")]
         public string OfferJson { get; set; }
+
+        /// <summary>
+        /// Gets or sets the credential preview.
+        /// </summary>
+        /// <value>
+        /// The preview.
+        /// </value>
+        [JsonProperty("credential_preview")]
+        public CredentialPreviewMessage Preview { get; set; }
 
         /// <inheritdoc />
         public override string ToString() =>

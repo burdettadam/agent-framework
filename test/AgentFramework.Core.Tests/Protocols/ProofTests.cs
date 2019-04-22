@@ -10,6 +10,7 @@ using AgentFramework.Core.Exceptions;
 using AgentFramework.Core.Messages;
 using AgentFramework.Core.Messages.Proofs;
 using AgentFramework.Core.Models.Connections;
+using AgentFramework.Core.Models.Credentials;
 using AgentFramework.Core.Models.Events;
 using AgentFramework.Core.Models.Proofs;
 using AgentFramework.Core.Runtime;
@@ -25,9 +26,9 @@ namespace AgentFramework.Core.Tests.Protocols
 {
     public class ProofTests : IAsyncLifetime
     {
-        private const string IssuerConfig = "{\"id\":\"issuer_proof_test_wallet\"}";
-        private const string HolderConfig = "{\"id\":\"holder_proof_test_wallet\"}";
-        private const string RequestorConfig = "{\"id\":\"requestor_proof_test_wallet\"}";
+        private readonly string IssuerConfig = $"{{\"id\":\"{Guid.NewGuid()}\"}}";
+        private readonly string HolderConfig = $"{{\"id\":\"{Guid.NewGuid()}\"}}";
+        private readonly string RequestorConfig = $"{{\"id\":\"{Guid.NewGuid()}\"}}";
         private const string WalletCredentials = "{\"key\":\"test_wallet_key\"}";
 
         private IAgentContext _issuerWallet;
@@ -106,17 +107,20 @@ namespace AgentFramework.Core.Tests.Protocols
 
             await Scenarios.IssueCredentialAsync(
                 _schemaService, _credentialService, _messages, issuerConnection, 
-                holderConnection, _issuerWallet, _holderWallet, await _holderWallet.Pool, TestConstants.DefaultMasterSecret, true);
+                holderConnection, _issuerWallet, _holderWallet, await _holderWallet.Pool, TestConstants.DefaultMasterSecret, true, new List<CredentialPreviewAttribute>
+                {
+                    new CredentialPreviewAttribute("first_name", "Test"),
+                    new CredentialPreviewAttribute("last_name", "Holder")
+                });
 
             _messages.Clear();
 
             //Requestor initialize a connection with the holder
-            var (_, requestorConnection) = await Scenarios.EstablishConnectionAsync(
+            var (holderRequestorConnection, requestorConnection) = await Scenarios.EstablishConnectionAsync(
                 _connectionService, _messages, _holderWallet, _requestorWallet);
 
-            // Verifier sends a proof request to prover
-            {
-                var proofRequestObject = new ProofRequest
+            await Scenarios.ProofProtocolAsync(_proofService, _messages, holderRequestorConnection, requestorConnection,
+                _holderWallet, _requestorWallet, new ProofRequest()
                 {
                     Name = "ProofReq",
                     Version = "1.0",
@@ -125,83 +129,11 @@ namespace AgentFramework.Core.Tests.Protocols
                     {
                         {"first-name-requirement", new ProofAttributeInfo {Name = "first_name"}}
                     }
-                };
+                });
 
-                //Requestor sends a proof request
-                var (message, _) = await _proofService.CreateProofRequestAsync(_requestorWallet, proofRequestObject, requestorConnection.Id);
-                _messages.Add(message);
-            }
-
-            // Holder accepts the proof requests and builds a proof
-            {
-                //Holder retrives proof request message from their cloud agent
-                var proofRequest = FindContentMessage<ProofRequestMessage>();
-                Assert.NotNull(proofRequest);
-
-                _holderWallet.Connection = holderConnection;
-                //Holder stores the proof request
-                var holderProofRequestId = await _proofService.ProcessProofRequestAsync(_holderWallet, proofRequest);
-                var holderProofRecord = await _proofService.GetAsync(_holderWallet, holderProofRequestId);
-                var holderProofObject =
-                    JsonConvert.DeserializeObject<ProofRequest>(holderProofRecord.RequestJson);
-
-                var requestedCredentials = new RequestedCredentials();
-                foreach (var requestedAttribute in holderProofObject.RequestedAttributes)
-                {
-                    var credentials =
-                        await _proofService.ListCredentialsForProofRequestAsync(_holderWallet, holderProofObject,
-                            requestedAttribute.Key);
-
-                    requestedCredentials.RequestedAttributes.Add(requestedAttribute.Key,
-                        new RequestedAttribute
-                        {
-                            CredentialId = credentials.First().CredentialInfo.Referent,
-                            Revealed = true,
-                            Timestamp = DateTimeOffset.UtcNow.ToUnixTimeSeconds()
-                        });
-                }
-
-                foreach (var requestedAttribute in holderProofObject.RequestedPredicates)
-                {
-                    var credentials =
-                        await _proofService.ListCredentialsForProofRequestAsync(_holderWallet, holderProofObject,
-                            requestedAttribute.Key);
-
-                    requestedCredentials.RequestedPredicates.Add(requestedAttribute.Key,
-                        new RequestedAttribute
-                        {
-                            CredentialId = credentials.First().CredentialInfo.Referent,
-                            Revealed = true
-                        });
-                }
-
-                //Holder accepts the proof request and sends a proof
-                (var proofMessage, var _) = await _proofService.CreateProofAsync(_holderWallet, holderProofRequestId, requestedCredentials);
-                _messages.Add(proofMessage);
-            }
-
-            //Requestor retrives proof message from their cloud agent
-            var proof = FindContentMessage<ProofMessage>();
-            Assert.NotNull(proof);
-
-            _requestorWallet.Connection = requestorConnection;
-            //Requestor stores proof
-            var requestorProofId = await _proofService.ProcessProofAsync(_requestorWallet, proof);
-
-            //Requestor verifies proof
-            var requestorVerifyResult = await _proofService.VerifyProofAsync(_requestorWallet, requestorProofId);
-
-            ////Verify the proof is valid
-            Assert.True(requestorVerifyResult);
+            _messages.Clear();
 
             Assert.True(events == 2);
-
-            ////Get the proof from both parties wallets
-            //var requestorProof = await _proofService.GetProof(_requestorWallet, requestorProofId);
-            //var holderProof = await _proofService.GetProof(_holderWallet, holderProofRequestId);
-
-            ////Verify that both parties have a copy of the proof
-            //Assert.Equal(requestorProof, holderProof);
         }
 
         [Fact]
@@ -268,12 +200,8 @@ namespace AgentFramework.Core.Tests.Protocols
             var (issuerConnection, _) = await Scenarios.EstablishConnectionAsync(
                 _connectionService, _messages, _issuerWallet, _holderWallet);
 
-            _issuerWallet.Connection = issuerConnection;
             var ex = await Assert.ThrowsAsync<AgentFrameworkException>(async () =>
-                await _proofService.ProcessProofAsync(_issuerWallet, new ProofMessage
-                {
-                    RequestNonce = "123"
-                }));
+                await _proofService.ProcessProofAsync(_issuerWallet, new ProofMessage()));
 
             Assert.True(ex.ErrorCode == ErrorCode.RecordNotFound);
         }
@@ -287,7 +215,11 @@ namespace AgentFramework.Core.Tests.Protocols
 
             await Scenarios.IssueCredentialAsync(
                 _schemaService, _credentialService, _messages, issuerConnection,
-                holderConnection, _issuerWallet, _holderWallet, await _holderWallet.Pool, TestConstants.DefaultMasterSecret, true);
+                holderConnection, _issuerWallet, _holderWallet, await _holderWallet.Pool, TestConstants.DefaultMasterSecret, true, new List<CredentialPreviewAttribute>
+                {
+                    new CredentialPreviewAttribute("first_name", "Test"),
+                    new CredentialPreviewAttribute("last_name", "Holder")
+                });
 
             _messages.Clear();
 
@@ -319,9 +251,8 @@ namespace AgentFramework.Core.Tests.Protocols
                 var proofRequest = FindContentMessage<ProofRequestMessage>();
                 Assert.NotNull(proofRequest);
 
-                _holderWallet.Connection = holderConnection;
                 //Holder stores the proof request
-                var holderProofRequestId = await _proofService.ProcessProofRequestAsync(_holderWallet, proofRequest);
+                var holderProofRequestId = await _proofService.ProcessProofRequestAsync(_holderWallet, proofRequest, holderConnection);
                 var holderProofRecord = await _proofService.GetAsync(_holderWallet, holderProofRequestId);
                 var holderProofObject =
                     JsonConvert.DeserializeObject<ProofRequest>(holderProofRecord.RequestJson);
@@ -366,7 +297,6 @@ namespace AgentFramework.Core.Tests.Protocols
             var proof = FindContentMessage<ProofMessage>();
             Assert.NotNull(proof);
 
-            _requestorWallet.Connection = requestorConnection;
             //Requestor stores proof
             await _proofService.ProcessProofAsync(_requestorWallet, proof);
 
@@ -391,7 +321,11 @@ namespace AgentFramework.Core.Tests.Protocols
 
             await Scenarios.IssueCredentialAsync(
                 _schemaService, _credentialService, _messages, issuerConnection,
-                holderConnection, _issuerWallet, _holderWallet, await _holderWallet.Pool, TestConstants.DefaultMasterSecret, true);
+                holderConnection, _issuerWallet, _holderWallet, await _holderWallet.Pool, TestConstants.DefaultMasterSecret, true, new List<CredentialPreviewAttribute>
+                {
+                    new CredentialPreviewAttribute("first_name", "Test"),
+                    new CredentialPreviewAttribute("last_name", "Holder")
+                });
 
             _messages.Clear();
 
@@ -422,9 +356,8 @@ namespace AgentFramework.Core.Tests.Protocols
             var proofRequest = FindContentMessage<ProofRequestMessage>();
             Assert.NotNull(proofRequest);
 
-            _holderWallet.Connection = holderConnection;
             //Holder stores the proof request
-            var holderProofRequestId = await _proofService.ProcessProofRequestAsync(_holderWallet, proofRequest);
+            var holderProofRequestId = await _proofService.ProcessProofRequestAsync(_holderWallet, proofRequest, holderConnection);
             var holderProofRecord = await _proofService.GetAsync(_holderWallet, holderProofRequestId);
             var holderProofObject =
                 JsonConvert.DeserializeObject<ProofRequest>(holderProofRecord.RequestJson);
@@ -483,7 +416,11 @@ namespace AgentFramework.Core.Tests.Protocols
 
             await Scenarios.IssueCredentialAsync(
                 _schemaService, _credentialService, _messages, issuerConnection,
-                holderConnection, _issuerWallet, _holderWallet, await _holderWallet.Pool, TestConstants.DefaultMasterSecret, true);
+                holderConnection, _issuerWallet, _holderWallet, await _holderWallet.Pool, TestConstants.DefaultMasterSecret, true, new List<CredentialPreviewAttribute>
+                {
+                    new CredentialPreviewAttribute("first_name", "Test"),
+                    new CredentialPreviewAttribute("last_name", "Holder")
+                });
 
             _messages.Clear();
 
@@ -513,9 +450,8 @@ namespace AgentFramework.Core.Tests.Protocols
             var proofRequest = FindContentMessage<ProofRequestMessage>();
             Assert.NotNull(proofRequest);
 
-            _holderWallet.Connection = holderConnection;
             //Holder stores the proof request
-            var holderProofRequestId = await _proofService.ProcessProofRequestAsync(_holderWallet, proofRequest);
+            var holderProofRequestId = await _proofService.ProcessProofRequestAsync(_holderWallet, proofRequest, holderConnection);
 
             //Holder accepts the proof request and sends a proof
             await _proofService.RejectProofRequestAsync(_holderWallet, holderProofRequestId);
