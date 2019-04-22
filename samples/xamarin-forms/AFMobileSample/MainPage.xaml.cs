@@ -45,9 +45,11 @@ namespace AFMobileSample
                 await _provisioningService.ProvisionAgentAsync(configuration);
             }
             catch (Exception ex)
-            when ((ex is AgentFrameworkException) || (ex is WalletExistsException))
+            //when ((ex is AgentFrameworkException) || (ex is WalletExistsException))
             {
-                await DisplayAlert("Error", "An agent has already been provisioned.", "OK");
+                //await DisplayAlert("Error", "An agent has already been provisioned.", "OK");
+                System.Diagnostics.Debug.WriteLine(ex);
+                System.Diagnostics.Debug.WriteLine("provision.....");
             }
 
             var wallet = await _walletService.GetWalletAsync(_config, _creds);
